@@ -54,3 +54,16 @@ def load_data_2D(imageNames, normImage=False, categorical=False,
             break
 
     return (images, affines) if getAffines else images
+
+class HipMRIDataset(Dataset):
+    def __init__(self, images, masks):
+        self.images = images
+        self.masks = masks
+
+    def __len__(self):
+        return len(self.images)
+
+    def __getitem__(self, idx):
+        image = torch.tensor(self.images[idx], dtype=torch.float32).unsqueeze(0)  # [1,H,W]
+        mask = torch.tensor(self.masks[idx], dtype=torch.float32).permute(2, 0, 1)  # [5,H,W]
+        return image, mask
