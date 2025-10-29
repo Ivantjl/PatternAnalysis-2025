@@ -2,14 +2,11 @@ import numpy as np
 import nibabel as nib
 from tqdm import tqdm
 
-def to_channels(arr: np.ndarray, dtype=np.uint8):
-    channels = np.unique(arr)
-    res = np.zeros(arr.shape + (len(channels),), dtype=dtype)
-    for c in channels:
-        c = int(c)
-        res[..., c:c+1][arr == c] = 1
+def to_channels(arr: np.ndarray, num_classes=5, dtype=np.uint8) -> np.ndarray:
+    res = np.zeros(arr.shape + (num_classes,), dtype=dtype)
+    for c in range(num_classes):
+        res[..., c][arr == c] = 1
     return res
-
 
 # load medical image functions
 def load_data_2D(imageNames, normImage=False, getAffines=False, early_stop=False):
