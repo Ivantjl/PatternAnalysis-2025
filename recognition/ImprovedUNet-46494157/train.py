@@ -36,20 +36,20 @@ def get_paths(subdir):
 # Load data
 train_img_paths = get_paths("keras_slices_train")
 train_mask_paths = get_paths("keras_slices_seg_train")
-val_img_paths   = get_paths("keras_slices_validate")
-val_mask_paths  = get_paths("keras_slices_seg_validate")
+val_img_paths = get_paths("keras_slices_validate")
+val_mask_paths = get_paths("keras_slices_seg_validate")
 
 train_images = load_data_2D(train_img_paths, normImage=True, categorical=False)
-train_masks  = load_data_2D(train_mask_paths, categorical=True)
-val_images   = load_data_2D(val_img_paths, normImage=True, categorical=False)
-val_masks    = load_data_2D(val_mask_paths, categorical=True)
+train_masks = load_data_2D(train_mask_paths, categorical=True)
+val_images = load_data_2D(val_img_paths, normImage=True, categorical=False)
+val_masks = load_data_2D(val_mask_paths, categorical=True)
 
 print("Loaded all data:")
 print("Train:", train_images.shape, train_masks.shape)
 print("Val:  ", val_images.shape, val_masks.shape)
 
 train_loader = DataLoader(HipMRIDataset(train_images, train_masks), batch_size=BATCH_SIZE, shuffle=True, num_workers=0)
-val_loader   = DataLoader(HipMRIDataset(val_images, val_masks), batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
+val_loader = DataLoader(HipMRIDataset(val_images, val_masks), batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
 
 # Model setup
 model = UNetImproved(in_channels=1, out_channels=NUM_CLASSES).to(DEVICE)
@@ -57,22 +57,23 @@ criterion = nn.CrossEntropyLoss()
 optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3)
 
-# Dice metric
+# Dice metric (per-class)
 @torch.no_grad()
-def dice_mean(logits, target, num_classes=5, eps=1e-6):
+def dice_per_class(logits, target, num_classes=5, eps=1e-6):
     pred = torch.argmax(logits, dim=1)
     target = torch.argmax(target, dim=1)
-    total = 0.0
+    dice_scores = []
     for c in range(num_classes):
         p = (pred == c).float()
         t = (target == c).float()
         inter = (p * t).sum()
         dice = (2 * inter + eps) / (p.sum() + t.sum() + eps)
-        total += dice
-    return total / num_classes
+        dice_scores.append(dice)
+    return torch.tensor(dice_scores)
 
 # Training
 train_losses, val_losses, val_dice_scores = [], [], []
+best_mean_dice = 0.0
 
 for epoch in range(EPOCHS):
     model.train()
@@ -80,7 +81,7 @@ for epoch in range(EPOCHS):
 
     for images, masks in tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS} [Train]"):
         images = images.to(DEVICE)
-        masks  = masks.to(DEVICE)
+        masks = masks.to(DEVICE)
         targets = torch.argmax(masks, dim=1)
 
         optimizer.zero_grad()
@@ -94,30 +95,40 @@ for epoch in range(EPOCHS):
     train_losses.append(avg_train_loss)
 
     model.eval()
-    val_loss, val_dice = 0.0, 0.0
+    val_loss = 0.0
+    dice_sum = torch.zeros(NUM_CLASSES, device=DEVICE)
     with torch.no_grad():
         for images, masks in tqdm(val_loader, desc=f"Epoch {epoch+1}/{EPOCHS} [Val]"):
             images = images.to(DEVICE)
-            masks  = masks.to(DEVICE)
+            masks = masks.to(DEVICE)
             targets = torch.argmax(masks, dim=1)
 
             logits = model(images)
             vloss = criterion(logits, targets)
             val_loss += vloss.item()
-            val_dice += dice_mean(logits, masks, NUM_CLASSES).item()
+            dice_scores = dice_per_class(logits, masks, NUM_CLASSES)
+            dice_sum += dice_scores.to(DEVICE)
 
     avg_val_loss = val_loss / len(val_loader)
-    avg_val_dice = val_dice / len(val_loader)
+    avg_dice_per_class = (dice_sum / len(val_loader)).cpu().numpy()
+    mean_dice = np.mean(avg_dice_per_class)
+
     val_losses.append(avg_val_loss)
-    val_dice_scores.append(avg_val_dice)
+    val_dice_scores.append(mean_dice)
     scheduler.step(avg_val_loss)
 
-    print(f"Epoch {epoch+1:02d}/{EPOCHS} | Train Loss: {avg_train_loss:.4f} "
-          f"| Val Loss: {avg_val_loss:.4f} | Dice: {avg_val_dice:.4f}")
+    print(f"\nEpoch {epoch+1:02d}/{EPOCHS} | Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
+    print("Per-class Dice:", " ".join([f"C{c}: {avg_dice_per_class[c]:.4f}" for c in range(NUM_CLASSES)]))
+    print(f"Mean Dice: {mean_dice:.4f}")
 
-# Save model and plots
-torch.save(model.state_dict(), "model_final.pth")
-print("Training complete!")
+    if mean_dice > best_mean_dice:
+        best_mean_dice = mean_dice
+        torch.save(model.state_dict(), "model_final.pth")
+        print(f"*** Saved new best model (Mean Dice: {best_mean_dice:.4f}) ***")
+
+# Save final plots
+print("\nTraining complete!")
+print(f"Best mean Dice: {best_mean_dice:.4f}")
 
 plt.figure()
 plt.plot(train_losses, label="Train")
@@ -126,6 +137,6 @@ plt.legend(); plt.title("Loss")
 plt.savefig("loss_curve.png"); plt.close()
 
 plt.figure()
-plt.plot(val_dice_scores, label="Val Dice")
+plt.plot(val_dice_scores, label="Val Mean Dice")
 plt.legend(); plt.title("Dice")
 plt.savefig("val_dice_curve.png"); plt.close()
